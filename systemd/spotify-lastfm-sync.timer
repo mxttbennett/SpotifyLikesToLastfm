@@ -1,0 +1,8 @@
+[Unit]
+Description=Hourly Spotify likes to Last.fm loves sync
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+[Install]
+WantedBy=timers.target

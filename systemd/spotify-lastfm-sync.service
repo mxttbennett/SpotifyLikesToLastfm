@@ -1,0 +1,12 @@
+[Unit]
+Description=Love Spotify liked songs on Last.fm
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/spotify-lastfm-sync
+EnvironmentFile=/home/ubuntu/spotify-lastfm-sync/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/spotify-lastfm-sync/venv/bin/python sync.py
+TimeoutStartSec=30min
