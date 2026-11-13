@@ -9,3 +9,4 @@ WorkingDirectory=/home/ubuntu/spotify-lastfm-sync
 EnvironmentFile=/home/ubuntu/spotify-lastfm-sync/.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/ubuntu/spotify-lastfm-sync/venv/bin/python sync.py
+TimeoutStartSec=30min
