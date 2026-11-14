@@ -7,10 +7,14 @@ import time
 import pylast
 import spotipy
 from spotipy.cache_handler import CacheFileHandler
+from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(HERE, "loved_songs.log")
+STATE_FILE = os.path.join(HERE, ".sync_state.json")
+BACKOFF_START, BACKOFF_MAX = 3600, 86400
+PAGE_DELAY = 0.5
 MAX_UNLOVES = int(os.environ.get("MAX_UNLOVES_PER_RUN", "20"))
 DRY_RUN = "--dry-run" in sys.argv[1:]
 
@@ -42,11 +46,45 @@ def clean_titles(tracks):
     return json.loads(out)
 
 
-def saved_tracks():
-    offset = 0
-    while items := sp.current_user_saved_tracks(limit=50, offset=offset)["items"]:
-        yield from (i["track"] for i in items)
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(**changes):
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({**load_state(), **changes}, f)
+    os.replace(tmp, STATE_FILE)
+
+
+def spotify_page(offset):
+    try:
+        return sp.current_user_saved_tracks(limit=50, offset=offset)
+    except SpotifyException as e:
+        if e.http_status != 429:
+            raise
+        # spotipy drops Retry-After once its retries give up, so double our own wait on each 429 instead.
+        state = load_state()
+        retry_after = (e.headers or {}).get("Retry-After")
+        wait = int(retry_after) if retry_after else min(max(state.get("backoff", 0) * 2, BACKOFF_START), BACKOFF_MAX)
+        save_state(backoff=wait, backoff_until=time.time() + wait)
+        print(f"Spotify rate limited; skipping runs for {wait // 60} min")
+        sys.exit(0)
+
+
+def saved_tracks(first=None):
+    page, offset = first or spotify_page(0), 0
+    while True:
+        yield from (i["track"] for i in page["items"] if i["track"] and i["track"]["id"])
+        if not page["next"]:
+            return
         offset += 50
+        time.sleep(PAGE_DELAY)
+        page = spotify_page(offset)
 
 
 def log_line(artist, title, track_id):
@@ -81,7 +119,20 @@ if os.path.exists(LOG_FILE):
     with open(LOG_FILE, encoding="utf-8") as f:
         logged = [line.strip() for line in f if line.strip()]
 
-liked = list(saved_tracks())
+backoff_until = load_state().get("backoff_until", 0)
+if time.time() < backoff_until:
+    print(f"Backing off Spotify for {int(backoff_until - time.time()) // 60} more min")
+    sys.exit(0)
+
+first = spotify_page(0)
+save_state(backoff=0, backoff_until=0)
+fingerprint = {"total": first["total"], "newest": first["items"][0]["track"]["id"] if first["items"] else None}
+# A like changes the newest id and an unlike drops the total, so a match means nothing to do.
+if not DRY_RUN and {k: load_state().get(k) for k in fingerprint} == fingerprint:
+    print("No Spotify like changes since the last run")
+    sys.exit(0)
+
+liked = list(saved_tracks(first))
 if not liked:
     sys.exit("Spotify returned no liked songs; refusing to treat every logged track as unliked")
 
@@ -140,5 +191,8 @@ for track, pair, clean in zip(new, pairs, clean_titles(pairs)):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(log_line(artist, title, track["id"]) + "\n")
     time.sleep(0.25)
+
+if not DRY_RUN and len(unliked) <= MAX_UNLOVES:
+    save_state(**fingerprint)
 
 print(f"Loved {loved} new tracks, unloved {unloved}{' (dry run)' if DRY_RUN else ''}")
