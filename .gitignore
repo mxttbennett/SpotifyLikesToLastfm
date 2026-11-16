@@ -2,3 +2,5 @@
 .cache
 loved_songs.log
 .sync_state.json
+loved_songs.db
+__pycache__
