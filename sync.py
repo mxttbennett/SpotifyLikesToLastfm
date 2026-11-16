@@ -10,8 +10,11 @@ from spotipy.cache_handler import CacheFileHandler
 from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 
+import store
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(HERE, "loved_songs.log")
+DB_FILE = os.path.join(HERE, "loved_songs.db")
 STATE_FILE = os.path.join(HERE, ".sync_state.json")
 BACKOFF_START, BACKOFF_MAX = 3600, 86400
 PAGE_DELAY = 0.5
@@ -87,19 +90,11 @@ def saved_tracks(first=None):
         page = spotify_page(offset)
 
 
-def log_line(artist, title, track_id):
-    return f"{artist} - {title} - {track_id}"
-
-
-def parse_log_line(line):
-    artist, rest = line.split(" - ", 1)
-    title, track_id = rest.rsplit(" - ", 1)
-    return artist, title, track_id
-
+db = store.open_store(DB_FILE, LOG_FILE)
+logged = store.active_tracks(db)
 
 if sys.argv[1:] == ["--fix-loved"]:
-    with open(LOG_FILE, encoding="utf-8") as f:
-        count = sum(1 for _ in f)
+    count = len(logged)
     tracks = [t for _, t in zip(range(count), saved_tracks())]
     pairs = [{"artist": t["artists"][0]["name"], "title": t["name"]} for t in tracks]
     fixed = 0
@@ -113,11 +108,6 @@ if sys.argv[1:] == ["--fix-loved"]:
         time.sleep(0.5)
     print(f"Relabelled {fixed} of {count} loved tracks")
     sys.exit()
-
-logged = []
-if os.path.exists(LOG_FILE):
-    with open(LOG_FILE, encoding="utf-8") as f:
-        logged = [line.strip() for line in f if line.strip()]
 
 backoff_until = load_state().get("backoff_until", 0)
 if time.time() < backoff_until:
@@ -141,8 +131,8 @@ liked_cleans = clean_titles(liked_pairs)
 liked_ids = {t["id"] for t in liked}
 still_liked = {(p["artist"].casefold(), c.casefold()) for p, c in zip(liked_pairs, liked_cleans)}
 
-# The log is the snapshot of what this script loved, so a logged id missing from Spotify was unliked.
-unliked = [parse_log_line(line) for line in logged if parse_log_line(line)[2] not in liked_ids]
+# Active rows are what this script loved, so an active id missing from Spotify was unliked.
+unliked = [row for row in logged if row[2] not in liked_ids]
 unliked_pairs = [{"artist": a, "title": t} for a, t, _ in unliked]
 unloved = 0
 dropped_ids = set()
@@ -165,14 +155,10 @@ else:
         dropped_ids.add(track_id)
 
 if dropped_ids and not DRY_RUN:
-    kept = [line for line in logged if parse_log_line(line)[2] not in dropped_ids]
-    tmp = LOG_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.writelines(line + "\n" for line in kept)
-    os.replace(tmp, LOG_FILE)
+    store.record_unlove(db, dropped_ids)
 
-logged_set = set(logged)
-new = [t for t in liked if log_line(t["artists"][0]["name"], t["name"], t["id"]) not in logged_set]
+logged_ids = {row[2] for row in logged}
+new = [t for t in liked if t["id"] not in logged_ids]
 
 pairs = [{"artist": t["artists"][0]["name"], "title": t["name"]} for t in new]
 loved = 0
@@ -188,8 +174,7 @@ for track, pair, clean in zip(new, pairs, clean_titles(pairs)):
     except pylast.WSError as e:
         # Logged anyway: an unloveable track would otherwise block every later run.
         print(f"Skipped {clean} by {artist}: {e}")
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(log_line(artist, title, track["id"]) + "\n")
+    store.record_love(db, artist, title, clean, track["id"])
     time.sleep(0.25)
 
 if not DRY_RUN and len(unliked) <= MAX_UNLOVES:
